@@ -1,0 +1,55 @@
+<?xml version="1.0"?>
+<robot name="lws"
+    xmlns:xacro="http://www.ros.org/wiki/xacro">
+
+    <!-- Основна база -->
+    <link name="base_link">
+        <visual>
+            <geometry>
+                <box size="0.1 0.1 0.05"/>
+            </geometry>
+            <origin xyz="0 0 0" rpy="0 0 0" />
+            <material name="grey">
+                <color rgba="0.5 0.5 0.5 1.0"/>
+            </material>
+        </visual>
+    </link>
+
+    <link name="platform">
+        <visual>
+            <geometry>
+                <cylinder radius="0.05" length="0.02"/>
+            </geometry>
+            <material name="dark_grey">
+                <color rgba="0.3 0.3 0.3 1.0"/>
+            </material>
+        </visual>
+    </link>
+
+    <joint name="base_to_platform" type="continuous">
+        <parent link="base_link"/>
+        <child link="platform"/>
+        <origin xyz="0 0 0.05" rpy="0 0 0"/>
+        <axis xyz="0 0 1"/>
+    </joint>
+
+    <link name="laser">
+        <visual>
+            <geometry>
+                <cylinder radius="0.02" length="0.1"/>
+            </geometry>
+            <material name="red">
+                <color rgba="1.0 0.0 0.0 1.0"/>
+            </material>
+        </visual>
+    </link>
+
+    <joint name="platform_to_laser" type="revolute">
+        <parent link="platform"/>
+        <child link="laser"/>
+        <origin xyz="0 0 0.02" rpy="0 0 0"/>
+        <axis xyz="1 0 0"/>
+        <limit lower="-0.5" upper="0.5" effort="1.0" velocity="0.5"/>
+    </joint>
+
+</robot>
