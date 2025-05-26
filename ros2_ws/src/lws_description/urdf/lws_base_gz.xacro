@@ -8,4 +8,33 @@
         </plugin>
     </gazebo>
 
+    <gazebo>
+        <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+            <joint_name>base_turret_base_joint</joint_name>
+            <topic>turret_base_position_cmd</topic>
+            <p_gain>10.0</p_gain>
+            <i_gain>0.1</i_gain>
+            <d_gain>1.0</d_gain>
+            <i_max>1.0</i_max>
+            <i_min>-1.0</i_min>
+            <cmd_max>10.0</cmd_max>
+            <cmd_min>-10.0</cmd_min>
+        </plugin>
+    </gazebo>
+
+    <gazebo>
+        <plugin filename="gz-sim-joint-position-controller-system" name="gz::sim::systems::JointPositionController">
+            <joint_name>base_turret_head_joint</joint_name>
+            <topic>turret_head_position_cmd</topic>
+            <p_gain>10.0</p_gain>
+            <i_gain>0.1</i_gain>
+            <d_gain>1.0</d_gain>
+            <i_max>1.0</i_max>
+            <i_min>-1.0</i_min>
+            <cmd_max>10.0</cmd_max>
+            <cmd_min>-10.0</cmd_min>
+        </plugin>
+    </gazebo>
+
+
 </robot>
