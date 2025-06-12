@@ -69,7 +69,11 @@ setup(
             "drone_swarm_manager = drone_swarm.drone_swarm_manager:main",
             'swarm_coordinator = drone_swarm.swarm_coordinator:main',
             'drone_controller = drone_swarm.drone_controller:main',
-            'target_selector = drone_swarm.target_selector:main'
+            # 'target_selector = drone_swarm.target_selector:main',
+            'square_formation_controller = drone_swarm.square_formation_controller:main',
+            'target_attack_controller = drone_swarm.target_attack_controller:main',
+            'target_selector = drone_swarm.target_selector:main',
+            'algorithm_coordinator = drone_swarm.algorithm_coordinator:main',
         ],
     },
 )

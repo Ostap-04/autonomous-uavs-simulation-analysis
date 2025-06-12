@@ -1,296 +1,458 @@
-#!/usr/bin/env python3
-
 import rclpy
 from rclpy.node import Node
-from geometry_msgs.msg import Point, PoseStamped, Twist, Vector3
-from sensor_msgs.msg import LaserScan, PointCloud2
-from std_msgs.msg import String
-from mavros_msgs.msg import State, OverrideRCIn
-from mavros_msgs.srv import CommandBool, CommandTOL, SetMode
-import numpy as np
+from rclpy.executors import MultiThreadedExecutor
+import sys
+import threading
 import math
-from pymavlink import mavutil
+import time
 
-class DroneController(Node):
-    def __init__(self, drone_id):
-        super().__init__(f'drone_controller_{drone_id}')
-        
+from mavros_msgs.srv import SetMode, CommandBool, CommandTOL
+from mavros_msgs.msg import State, PositionTarget
+from sensor_msgs.msg import NavSatFix
+from geometry_msgs.msg import PoseStamped, TwistStamped
+from std_msgs.msg import String
+from rclpy.qos import QoSProfile, QoSReliabilityPolicy
+
+
+class DroneControllerNode(Node):
+    def __init__(self, drone_id: int, target_altitude: float = 5.0):
+        super().__init__(f'drone_{drone_id}_controller_node')
+
         self.drone_id = drone_id
-        self.current_position = Point()
-        self.target_waypoint = Point()
-        self.target_position = Point()
-        self.current_state = "IDLE"
-        
-        # Obstacle avoidance parameters
-        self.obstacle_distance_threshold = 5.0
-        self.avoidance_strength = 2.0
-        self.max_velocity = 5.0
-        
-        # Attack parameters
-        self.attack_distance = 2.0
-        self.is_attacking = False
-        
-        # MAVROS connection
-        # self.mavros_ns = f'/drone_{drone_id}/mavros'
-        self.mavros_ns = f'/drone_{drone_id}'
+        self.ns = f"/drone_{drone_id}"
+        self.altitude = target_altitude
+        self.gps_fix_received = False
+        self.current_state = "IDLE"  # IDLE, ARMED, TAKEOFF, FORMATION, ATTACKING
+        self.current_position = None
+        self.target_position = None
+        self.formation_position = None
 
-        
+        # QoS profiles
+        self.qos = QoSProfile(depth=10)
+        self.qos.reliability = QoSReliabilityPolicy.BEST_EFFORT
+
+        # Service clients
+        self.set_mode_client = self.create_client(SetMode, f"{self.ns}/set_mode")
+        self.arming_client = self.create_client(CommandBool, f"{self.ns}/cmd/arming")
+        self.takeoff_client = self.create_client(CommandTOL, f"{self.ns}/cmd/takeoff")
+
         # Publishers
+        self.setpoint_pub = self.create_publisher(
+            PoseStamped, 
+            f"{self.ns}/setpoint_position/local", 
+            self.qos
+        )
         self.velocity_pub = self.create_publisher(
-            Twist, f'{self.mavros_ns}/setpoint_velocity/cmd_vel_unstamped', 10)
-        self.position_pub = self.create_publisher(
-            PoseStamped, f'/drone_{drone_id}/position', 10)
-        
+            TwistStamped,
+            f"{self.ns}/setpoint_velocity/cmd_vel",
+            self.qos
+        )
+
         # Subscribers
-        self.waypoint_sub = self.create_subscription(
-            PoseStamped, f'/drone_{drone_id}/waypoint',
-            self.waypoint_callback, 10)
-        
-        self.command_sub = self.create_subscription(
-            String, f'/drone_{drone_id}/command',
-            self.command_callback, 10)
-        
-        self.target_sub = self.create_subscription(
-            Point, '/swarm/target',
-            self.target_callback, 10)
-        
-        self.state_sub = self.create_subscription(
-            State, f'{self.mavros_ns}/state',
-            self.state_callback, 10)
+        self.gps_sub = self.create_subscription(
+            NavSatFix,
+            f"{self.ns}/global_position/global",
+            self.gps_callback,
+            self.qos
+        )
         
         self.position_sub = self.create_subscription(
-            PoseStamped, f'{self.mavros_ns}/local_position/pose',
-            self.position_callback, 10)
-        
-        # Lidar/obstacle detection (simulated)
-        self.laser_sub = self.create_subscription(
-            LaserScan, f'/drone_{drone_id}/scan',
-            self.laser_callback, 10)
-        
-        # Services
-        self.arming_client = self.create_client(
-            CommandBool, f'{self.mavros_ns}/cmd/arming')
-        self.set_mode_client = self.create_client(
-            SetMode, f'{self.mavros_ns}/set_mode')
-        self.takeoff_client = self.create_client(
-            CommandTOL, f'{self.mavros_ns}/cmd/takeoff')
-        
+            PoseStamped,
+            f"{self.ns}/local_position/pose",
+            self.position_callback,
+            self.qos
+        )
+
+        self.state_sub = self.create_subscription(
+            State,
+            f"{self.ns}/state",
+            self.state_callback,
+            self.qos
+        )
+
+        # Command subscriber (global for all drones)
+        self.command_sub = self.create_subscription(
+            String,
+            "/drone_command",
+            self.command_callback,
+            self.qos
+        )
+
         # Control timer
-        self.control_timer = self.create_timer(0.05, self.control_loop)  # 20Hz
+        self.control_timer = self.create_timer(0.1, self.control_loop)
         
-        # Obstacle data
-        self.obstacles = []
-        self.mavros_state = None
+        self.get_logger().info(f"[drone_{self.drone_id}] 🤖 Controller initialized, waiting for commands...")
+
+    def gps_callback(self, msg: NavSatFix):
+        if msg.status.status >= 0 and not self.gps_fix_received:
+            self.gps_fix_received = True
+            self.get_logger().info(f"[drone_{self.drone_id}] ✅ GPS fix acquired.")
+
+    def position_callback(self, msg: PoseStamped):
+        self.current_position = msg
+
+    def state_callback(self, msg: State):
+        pass  # Can be used to monitor drone state
+
+    def command_callback(self, msg: String):
+        command = msg.data.strip().upper()
+        self.get_logger().info(f"[drone_{self.drone_id}] 📢 Received command: {command}")
         
-        self.get_logger().info(f"Drone {drone_id} controller initialized")
-    
-    def waypoint_callback(self, msg):
-        """Receive new waypoint from swarm coordinator"""
-        self.target_waypoint.x = msg.pose.position.x
-        self.target_waypoint.y = msg.pose.position.y
-        self.target_waypoint.z = msg.pose.position.z
-    
-    def command_callback(self, msg):
-        """Receive commands from swarm coordinator"""
-        command = msg.data
-        
-        if command == "ARM_AND_TAKEOFF":
-            self.arm_and_takeoff()
-        elif command == "ATTACK_MODE":
-            self.is_attacking = True
-            self.current_state = "ATTACKING"
-        elif command == "SEARCH_MODE":
-            self.current_state = "SEARCHING"
+        if command == "ARM_TAKEOFF":
+            self.handle_arm_takeoff()
+        elif command.startswith("FORM_FIGURE"):
+            self.handle_form_figure(command)
+        elif command.startswith("ATTACK_TARGET"):
+            self.handle_attack_target(command)
+        elif command == "LAND":
+            self.handle_land()
         elif command == "RTL":
-            self.return_to_launch()
-    
-    def target_callback(self, msg):
-        """Receive target position"""
-        self.target_position = msg
-    
-    def state_callback(self, msg):
-        """MAVROS state callback"""
-        self.mavros_state = msg
-    
-    def position_callback(self, msg):
-        """Update current position"""
-        self.current_position.x = msg.pose.position.x
-        self.current_position.y = msg.pose.position.y
-        self.current_position.z = msg.pose.position.z
-        
-        # Publish position for swarm coordinator
-        self.position_pub.publish(msg)
-    
-    def laser_callback(self, msg):
-        """Process laser scan for obstacle detection"""
-        self.obstacles = []
-        
-        for i, distance in enumerate(msg.ranges):
-            if distance < self.obstacle_distance_threshold and distance > 0.1:
-                angle = msg.angle_min + i * msg.angle_increment
-                
-                # Convert to cartesian coordinates relative to drone
-                obstacle_x = distance * math.cos(angle)
-                obstacle_y = distance * math.sin(angle)
-                
-                # Convert to global coordinates
-                global_x = self.current_position.x + obstacle_x
-                global_y = self.current_position.y + obstacle_y
-                
-                self.obstacles.append((global_x, global_y, distance))
-    
-    def arm_and_takeoff(self):
-        """Arm drone and takeoff"""
-        if not self.mavros_state:
+            self.handle_rtl()
+
+    def handle_arm_takeoff(self):
+        if not self.gps_fix_received:
+            self.get_logger().warn(f"[drone_{self.drone_id}] ⚠️ No GPS fix, cannot takeoff")
             return
-        
-        # Set GUIDED mode
-        mode_req = SetMode.Request()
-        mode_req.custom_mode = "GUIDED"
-        self.set_mode_client.call_async(mode_req)
-        
-        # Arm
-        arm_req = CommandBool.Request()
-        arm_req.value = True
-        self.arming_client.call_async(arm_req)
-        
-        # Takeoff
-        takeoff_req = CommandTOL.Request()
-        takeoff_req.altitude = 5.0
-        self.takeoff_client.call_async(takeoff_req)
-        
-        self.current_state = "ARMED"
-        self.get_logger().info(f"Drone {self.drone_id} armed and taking off")
-    
-    def calculate_repulsive_force(self):
-        """Calculate repulsive force from obstacles"""
-        force_x = 0.0
-        force_y = 0.0
-        
-        for obs_x, obs_y, distance in self.obstacles:
-            if distance > 0:
-                # Direction from obstacle to drone
-                dx = self.current_position.x - obs_x
-                dy = self.current_position.y - obs_y
-                
-                # Normalize
-                magnitude = math.sqrt(dx*dx + dy*dy)
-                if magnitude > 0:
-                    dx /= magnitude
-                    dy /= magnitude
-                    
-                    # Repulsive force inversely proportional to distance
-                    force_magnitude = self.avoidance_strength / (distance * distance)
-                    force_x += dx * force_magnitude
-                    force_y += dy * force_magnitude
-        
-        return force_x, force_y
-    
-    def calculate_attractive_force(self, target):
-        """Calculate attractive force towards target"""
-        dx = target.x - self.current_position.x
-        dy = target.y - self.current_position.y
-        dz = target.z - self.current_position.z
-        
-        distance = math.sqrt(dx*dx + dy*dy + dz*dz)
-        
-        if distance > 0:
-            # Normalize and scale
-            attraction_strength = min(2.0, distance * 0.5)
-            return (dx/distance * attraction_strength, 
-                   dy/distance * attraction_strength,
-                   dz/distance * attraction_strength)
-        
-        return 0.0, 0.0, 0.0
-    
-    def calculate_swarm_separation(self):
-        """Calculate separation force from other drones (simplified)"""
-        # This would require position sharing between drones
-        # For now, return zero - implement inter-drone communication for full effect
-        return 0.0, 0.0
-    
-    def control_loop(self):
-        """Main control loop"""
-        if not self.mavros_state or not self.mavros_state.armed:
-            return
-        
-        # Calculate forces
-        repulsive_x, repulsive_y = self.calculate_repulsive_force()
-        attractive_x, attractive_y, attractive_z = self.calculate_attractive_force(
-            self.target_waypoint)
-        separation_x, separation_y = self.calculate_swarm_separation()
-        
-        # Combine forces
-        total_x = attractive_x + repulsive_x + separation_x
-        total_y = attractive_y + repulsive_y + separation_y
-        total_z = attractive_z
-        
-        # Apply velocity limits
-        velocity_magnitude = math.sqrt(total_x*total_x + total_y*total_y + total_z*total_z)
-        if velocity_magnitude > self.max_velocity:
-            scale = self.max_velocity / velocity_magnitude
-            total_x *= scale
-            total_y *= scale
-            total_z *= scale
-        
-        # Attack behavior
-        if self.is_attacking and self.target_position:
-            distance_to_target = math.sqrt(
-                (self.target_position.x - self.current_position.x)**2 +
-                (self.target_position.y - self.current_position.y)**2 +
-                (self.target_position.z - self.current_position.z)**2
-            )
             
-            if distance_to_target < self.attack_distance:
-                # Execute attack (this could trigger payload release, etc.)
-                self.execute_attack()
+        if self.current_state != "IDLE":
+            self.get_logger().warn(f"[drone_{self.drone_id}] ⚠️ Already in state: {self.current_state}")
+            return
+
+        self.current_state = "ARMING"
+        self.get_logger().info(f"[drone_{self.drone_id}] ⏳ Starting ARM_TAKEOFF sequence")
         
-        # Publish velocity command
-        cmd_vel = Twist()
-        cmd_vel.linear.x = total_x
-        cmd_vel.linear.y = total_y
-        cmd_vel.linear.z = total_z
+        # Start takeoff sequence in a separate thread
+        threading.Thread(target=self.execute_takeoff_sequence, daemon=True).start()
+
+    def handle_form_figure(self, command):
+        if self.current_state not in ["TAKEOFF", "FORMATION"]:
+            self.get_logger().warn(f"[drone_{self.drone_id}] ⚠️ Must be airborne to form figure")
+            return
+
+        # Parse figure type and parameters
+        parts = command.split()
+        if len(parts) < 2:
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Invalid FORM_FIGURE command")
+            return
+
+        figure_type = parts[1]
+        self.current_state = "FORMATION"
         
-        self.velocity_pub.publish(cmd_vel)
-    
-    def execute_attack(self):
-        """Execute attack on target"""
-        self.get_logger().info(f"Drone {self.drone_id} executing attack!")
-        # Here you would implement the actual attack logic
-        # This could involve:
-        # - Payload release
-        # - Precision positioning
-        # - Confirmation of hit
-        # - RTL command
+        if figure_type == "CIRCLE":
+            radius = float(parts[2]) if len(parts) > 2 else 10.0
+            self.form_circle_formation(radius)
+        elif figure_type == "LINE":
+            spacing = float(parts[2]) if len(parts) > 2 else 5.0
+            self.form_line_formation(spacing)
+        elif figure_type == "TRIANGLE":
+            size = float(parts[2]) if len(parts) > 2 else 10.0
+            self.form_triangle_formation(size)
+
+    def handle_attack_target(self, command):
+        if self.current_state not in ["TAKEOFF", "FORMATION"]:
+            self.get_logger().warn(f"[drone_{self.drone_id}] ⚠️ Must be airborne to attack target")
+            return
+
+        # Parse target coordinates
+        parts = command.split()
+        if len(parts) < 4:  # ATTACK_TARGET X Y Z
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Invalid ATTACK_TARGET command")
+            return
+
+        try:
+            target_x = float(parts[1])
+            target_y = float(parts[2])
+            target_z = float(parts[3])
+            
+            self.current_state = "ATTACKING"
+            self.attack_target(target_x, target_y, target_z)
+            
+        except ValueError:
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Invalid target coordinates")
+
+    def handle_land(self):
+        self.current_state = "LANDING"
+        self.set_mode("LAND")
+
+    def handle_rtl(self):
+        self.current_state = "RTL"
+        self.set_mode("RTL")
+
+    def execute_takeoff_sequence(self):
+        try:
+            # Set mode to GUIDED
+            if not self.set_mode("GUIDED"):
+                return
+
+            time.sleep(1)
+
+            # Arm the drone
+            if not self.arm_drone():
+                return
+
+            time.sleep(2)
+
+            # Send takeoff command
+            if not self.send_takeoff():
+                return
+
+            self.current_state = "TAKEOFF"
+            self.get_logger().info(f"[drone_{self.drone_id}] 🚀 Takeoff sequence complete!")
+
+        except Exception as e:
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Takeoff sequence failed: {e}")
+            self.current_state = "IDLE"
+
+    def set_mode(self, mode):
+        if not self.set_mode_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Set mode service not available")
+            return False
+
+        mode_req = SetMode.Request(base_mode=0, custom_mode=mode)
+        future = self.set_mode_client.call_async(mode_req)
         
-        self.is_attacking = False
-        self.current_state = "ATTACK_COMPLETE"
-    
-    def return_to_launch(self):
-        """Return to launch position"""
-        mode_req = SetMode.Request()
-        mode_req.custom_mode = "RTL"
-        self.set_mode_client.call_async(mode_req)
+        # Don't block the main thread - check periodically
+        start_time = time.time()
+        while not future.done() and (time.time() - start_time) < 10.0:
+            time.sleep(0.1)
+        
+        if future.result() and future.result().mode_sent:
+            self.get_logger().info(f"[drone_{self.drone_id}] ✅ Mode set to {mode}")
+            return True
+        else:
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Failed to set mode to {mode}")
+            return False
+
+    def arm_drone(self):
+        if not self.arming_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Arming service not available")
+            return False
+
+        arm_req = CommandBool.Request(value=True)
+        future = self.arming_client.call_async(arm_req)
+        
+        # Don't block the main thread - check periodically
+        start_time = time.time()
+        while not future.done() and (time.time() - start_time) < 10.0:
+            time.sleep(0.1)
+        
+        if future.result() and future.result().success:
+            self.get_logger().info(f"[drone_{self.drone_id}] ✅ Armed successfully")
+            return True
+        else:
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Failed to arm")
+            return False
+
+    def send_takeoff(self):
+        if not self.takeoff_client.wait_for_service(timeout_sec=5.0):
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Takeoff service not available")
+            return False
+
+        takeoff_req = CommandTOL.Request(
+            min_pitch=0.0,
+            yaw=0.0,
+            latitude=0.0,
+            longitude=0.0,
+            altitude=self.altitude
+        )
+        future = self.takeoff_client.call_async(takeoff_req)
+        
+        # Don't block the main thread - check periodically
+        start_time = time.time()
+        while not future.done() and (time.time() - start_time) < 10.0:
+            time.sleep(0.1)
+        
+        if future.result() and future.result().success:
+            self.get_logger().info(f"[drone_{self.drone_id}] ✅ Takeoff command sent")
+            return True
+        else:
+            self.get_logger().error(f"[drone_{self.drone_id}] ❌ Failed to send takeoff command")
+            return False
+
+    def form_circle_formation(self, radius):
+        # Calculate position in circle based on drone_id
+        angle = (self.drone_id * 2 * math.pi) / 8  # Assuming max 8 drones
+        
+        self.formation_position = PoseStamped()
+        self.formation_position.header.frame_id = "base_link"
+        self.formation_position.pose.position.x = radius * math.cos(angle)
+        self.formation_position.pose.position.y = radius * math.sin(angle)
+        self.formation_position.pose.position.z = self.altitude
+        
+        self.get_logger().info(f"[drone_{self.drone_id}] 🔵 Moving to circle formation position")
+
+    def form_line_formation(self, spacing):
+        # Form a line with drones spaced apart
+        self.formation_position = PoseStamped()
+        self.formation_position.header.frame_id = "base_link"
+        self.formation_position.pose.position.x = 0.0
+        self.formation_position.pose.position.y = (self.drone_id - 1) * spacing
+        self.formation_position.pose.position.z = self.altitude
+        
+        self.get_logger().info(f"[drone_{self.drone_id}] 📏 Moving to line formation position")
+
+    def form_triangle_formation(self, size):
+        # Form triangle formation (supports up to 3 drones effectively)
+        positions = [
+            (0, 0),  # Top
+            (-size/2, -size * 0.866),  # Bottom left
+            (size/2, -size * 0.866),   # Bottom right
+        ]
+        
+        if self.drone_id <= len(positions):
+            pos = positions[(self.drone_id - 1) % len(positions)]
+            self.formation_position = PoseStamped()
+            self.formation_position.header.frame_id = "base_link"
+            self.formation_position.pose.position.x = pos[0]
+            self.formation_position.pose.position.y = pos[1]
+            self.formation_position.pose.position.z = self.altitude
+            
+            self.get_logger().info(f"[drone_{self.drone_id}] 🔺 Moving to triangle formation position")
+
+    def attack_target(self, target_x, target_y, target_z):
+        # Create attack pattern - approach target in coordinated manner
+        self.target_position = PoseStamped()
+        self.target_position.header.frame_id = "base_link"
+        
+        # Each drone approaches from slightly different angle
+        angle_offset = (self.drone_id - 1) * (math.pi / 4)  # 45 degree offset per drone
+        approach_distance = 2.0  # Stay 2m from target
+        
+        self.target_position.pose.position.x = target_x + approach_distance * math.cos(angle_offset)
+        self.target_position.pose.position.y = target_y + approach_distance * math.sin(angle_offset)
+        self.target_position.pose.position.z = target_z
+        
+        self.get_logger().info(f"[drone_{self.drone_id}] ⚔️ Attacking target at ({target_x}, {target_y}, {target_z})")
+
+    def control_loop(self):
+        # Publish setpoints based on current state
+        if self.current_state == "FORMATION" and self.formation_position:
+            self.formation_position.header.stamp = self.get_clock().now().to_msg()
+            self.setpoint_pub.publish(self.formation_position)
+            
+        elif self.current_state == "ATTACKING" and self.target_position:
+            self.target_position.header.stamp = self.get_clock().now().to_msg()
+            self.setpoint_pub.publish(self.target_position)
+
+
+class CommandInterface:
+    """Simple command line interface for sending commands to drones"""
+    def __init__(self, node):
+        self.node = node
+        self.command_pub = node.create_publisher(String, "/drone_command", 10)
+        self.running = True
+        
+    def run(self):
+        print("\n🎮 DRONE COMMAND INTERFACE")
+        print("Available commands:")
+        print("  ARM_TAKEOFF                    - Arm and takeoff all drones")
+        print("  FORM_FIGURE CIRCLE [radius]   - Form circle formation")
+        print("  FORM_FIGURE LINE [spacing]    - Form line formation") 
+        print("  FORM_FIGURE TRIANGLE [size]   - Form triangle formation")
+        print("  ATTACK_TARGET x y z           - Attack target at coordinates")
+        print("  LAND                          - Land all drones")
+        print("  RTL                           - Return to launch")
+        print("  quit                          - Exit\n")
+        
+        import sys
+        
+        while self.running and rclpy.ok():
+            try:
+                # Use sys.stdout.write and sys.stdout.flush for better control
+                sys.stdout.write("Enter command: ")
+                sys.stdout.flush()
+                
+                # Read input with proper handling
+                command = input().strip()
+                
+                if command.lower() == 'quit':
+                    self.running = False
+                    break
+                    
+                if command:
+                    msg = String()
+                    msg.data = command
+                    self.command_pub.publish(msg)
+                    print(f"📤 Sent command: {command}")
+                    # Small delay to ensure message is sent
+                    time.sleep(0.1)
+                else:
+                    print("⚠️ Empty command, please try again")
+                    
+            except KeyboardInterrupt:
+                print("\n🛑 Interrupted by user")
+                self.running = False
+                break
+            except EOFError:
+                print("\n🛑 Input ended")
+                self.running = False
+                break
+            except Exception as e:
+                print(f"❌ Input error: {e}")
+                continue
+
 
 def main(args=None):
-    rclpy.init(args=args)
-    
-    # Get drone ID from command line argument
-    import sys
-    if len(sys.argv) < 2:
-        print("Usage: drone_controller.py <drone_id>")
+    if args is None:
+        args = sys.argv
+
+    if len(args) < 2:
+        print("Usage: ros2 run <package> drone_controller <drone_id_1> [<drone_id_2> ...] [--alt <altitude>]")
         return
-    
-    drone_id = int(sys.argv[1])
-    controller = DroneController(drone_id)
-    
+
+    if "--alt" in args:
+        alt_index = args.index("--alt")
+        altitude = float(args[alt_index + 1])
+        drone_ids = [int(arg) for arg in args[1:alt_index]]
+    else:
+        altitude = 5.0
+        drone_ids = [int(arg) for arg in args[1:]]
+
+    rclpy.init(args=args)
+
+    executor = MultiThreadedExecutor()
+    nodes = []
+
+    # Create drone controller nodes
+    for drone_id in drone_ids:
+        node = DroneControllerNode(drone_id, altitude)
+        nodes.append(node)
+        executor.add_node(node)
+
+    # Create command interface
+    command_node = Node('command_interface')
+    executor.add_node(command_node)
+    cmd_interface = CommandInterface(command_node)
+
+    # Start executor in separate thread
+    executor_thread = threading.Thread(target=executor.spin, daemon=True)
+    executor_thread.start()
+
     try:
-        rclpy.spin(controller)
+        # Give some time for nodes to initialize
+        time.sleep(1)
+        # Run command interface in main thread
+        cmd_interface.run()
     except KeyboardInterrupt:
-        pass
+        print("\n🛑 Interrupted by user")
     finally:
-        controller.destroy_node()
+        # Cleanup
+        cmd_interface.running = False
+        executor.shutdown()
+        
+        for node in nodes:
+            try:
+                node.destroy_node()
+            except:
+                pass
+        try:
+            command_node.destroy_node()
+        except:
+            pass
+            
         rclpy.shutdown()
+        print("✅ Drone controller shutdown complete.")
+
 
 if __name__ == '__main__':
     main()

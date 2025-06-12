@@ -64,6 +64,7 @@ def generate_launch_description():
     sitl_port_base = 5760
     dds_port_base = 2019
     sim_port_base = 5501
+    out_port_base = 14550
 
     # Include SITL DDS component for this drone
     sitl_dds = IncludeLaunchDescription(
@@ -87,6 +88,8 @@ def generate_launch_description():
             "speedup": "1",
             "slave": "0",
             "instance": drone_id,
+            "console": "True",
+            "sysid": PythonExpression(["int(", drone_id, ") + 1"]),
             "defaults": os.path.join(
                 pkg_ardupilot_gazebo,
                 "config",
@@ -103,6 +106,7 @@ def generate_launch_description():
             "master": PythonExpression(['"tcp:127.0.0.1:" + str(', str(sitl_port_base), ' + int(', drone_id, ') * 10)']),
 
             "sitl": PythonExpression(['"127.0.0.1:" + str(', str(sim_port_base), ' + int(', drone_id, ') * 10)']),
+            "out": PythonExpression(['"127.0.0.1:" + str(', str(out_port_base), ' + int(', drone_id, ') * 10)']),
         }.items(),
     )
 

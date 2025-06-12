@@ -72,19 +72,41 @@
         <pose degrees="true">-29 545 0 0 0 363</pose>
     </include>
 
-    <!-- Drone 0 -->
     <include>
-      <uri>model://drone00</uri>
-      <name>iris_0</name>
+      <uri>model://drone0</uri>
+      <name>drone_0</name>
       <pose degrees="true">0 0 0.195 0 0 90</pose>
     </include>
 
-    <!-- Drone 1 -->
     <include>
-      <uri>model://drone10</uri>
-      <name>iris_1</name>
+      <uri>model://drone1</uri>
+      <name>drone_1</name>
       <pose degrees="true">2 0 0.195 0 0 90</pose>
     </include>
+
+    <include>
+      <uri>model://drone2</uri>
+      <name>drone_2</name>
+      <pose degrees="true">4 0 0.195 0 0 90</pose>
+    </include>
+
+    <include>
+      <uri>model://drone3</uri>
+      <name>drone_3</name>
+      <pose degrees="true">6 0 0.195 0 0 90</pose>
+    </include>
+
+    <include>
+      <uri>model://drone4</uri>
+      <name>drone_4</name>
+      <pose degrees="true">8 0 0.195 0 0 90</pose>
+    </include>
+
+    <!-- <include>
+      <uri>model://drone5</uri>
+      <name>drone_6</name>
+      <pose degrees="true">10 0 0.195 0 0 90</pose>
+    </include> -->
 
     <!-- Drone 2 -->
    <!-- <include>
