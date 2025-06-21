@@ -1,0 +1,96 @@
+<launch>
+    <!-- Original robot setup -->
+    <let name="urdf_path" value="$(find-pkg-share lws_description)/urdf/lws.urdf.xacro" />
+    <let name="gazebo_config_path" 
+         value="$(find-pkg-share lws_bringup)/config/gazebo_bridge/gazebo_bridge.yaml" />
+    <let name="rviz_config_path"
+         value="$(find-pkg-share lws_bringup)/config/rviz/urdf_config.rviz" /> 
+
+    <!-- Robot State Publisher -->
+    <node pkg="robot_state_publisher" exec="robot_state_publisher">
+        <param name="robot_description" 
+               value="$(command 'xacro $(var urdf_path)')" />
+    </node>
+
+    <!-- Joint State Publisher GUI -->
+    <node pkg="joint_state_publisher_gui" exec="joint_state_publisher_gui" />
+
+    <!-- Gazebo Simulation -->
+    <include file="$(find-pkg-share ros_gz_sim)/launch/gz_sim.launch.py">
+        <arg name="gz_args" value="$(find-pkg-share lws_bringup)/worlds/test_world.sdf -r" />
+    </include>
+
+    <!-- Spawn robot in Gazebo -->
+    <node pkg="ros_gz_sim" exec="create" args="-topic robot_description" />
+
+    <!-- Gazebo-ROS Bridge -->
+    <node pkg="ros_gz_bridge" exec="parameter_bridge">
+        <param name="config_file" value="$(var gazebo_config_path)" />
+    </node>
+
+    <!-- RViz -->
+    <node pkg="rviz2" exec="rviz2" args="-d $(var rviz_config_path)" />
+
+    <!-- ArduPilot SITL Drone 1 -->
+    <node pkg="ardupilot_sitl" exec="ardupilot_sitl" 
+          name="drone1_sitl" namespace="drone1">
+        <param name="command" value="arducopter" />
+        <param name="model" value="gazebo-iris" />
+        <param name="speedup" value="1" />
+        <param name="slave" value="0" />
+        <param name="instance" value="0" />
+        <param name="sim_address" value="127.0.0.1" />
+        <param name="master" value="tcp:127.0.0.1:5760" />
+        <param name="sitl" value="127.0.0.1:5501" />
+        <param name="home" value="-35.363261,149.165230,584,353" />
+        <param name="defaults" value="$(find-pkg-share ardupilot)/config/default_params/copter.parm" />
+    </node>
+
+    <!-- ArduPilot SITL Drone 2 -->
+    <node pkg="ardupilot_sitl" exec="ardupilot_sitl" 
+          name="drone2_sitl" namespace="drone2">
+        <param name="command" value="arducopter" />
+        <param name="model" value="gazebo-iris" />
+        <param name="speedup" value="1" />
+        <param name="slave" value="1" />
+        <param name="instance" value="1" />
+        <param name="sim_address" value="127.0.0.1" />
+        <param name="master" value="tcp:127.0.0.1:5770" />
+        <param name="sitl" value="127.0.0.1:5511" />
+        <param name="home" value="-35.363261,149.165250,584,353" />
+        <param name="defaults" value="$(find-pkg-share ardupilot)/config/default_params/copter.parm" />
+    </node>
+
+    <!-- Spawn Drone 1 in Gazebo -->
+    <node pkg="ros_gz_sim" exec="create" 
+          args="-name drone1 -file $(find-pkg-share ardupilot_gazebo)/models/iris_with_ardupilot/model.sdf -x 0 -y 0 -z 0.2" />
+
+    <!-- Spawn Drone 2 in Gazebo -->
+    <node pkg="ros_gz_sim" exec="create" 
+          args="-name drone2 -file $(find-pkg-share ardupilot_gazebo)/models/iris_with_ardupilot/model.sdf -x 2 -y 0 -z 0.2" />
+
+    <!-- MAVLink Bridge for Drone 1 -->
+    <node pkg="mavros" exec="mavros_node" name="mavros_drone1" namespace="drone1">
+        <param name="fcu_url" value="tcp://127.0.0.1:5760" />
+        <param name="gcs_url" value="" />
+        <param name="target_system_id" value="1" />
+        <param name="target_component_id" value="1" />
+        <param name="fcu_protocol" value="v2.0" />
+        <remap from="/drone1/mavros/imu/data" to="/drone1/imu/data" />
+        <remap from="/drone1/mavros/global_position/global" to="/drone1/global_position/global" />
+        <remap from="/drone1/mavros/local_position/pose" to="/drone1/local_position/pose" />
+    </node>
+
+    <!-- MAVLink Bridge for Drone 2 -->
+    <node pkg="mavros" exec="mavros_node" name="mavros_drone2" namespace="drone2">
+        <param name="fcu_url" value="tcp://127.0.0.1:5770" />
+        <param name="gcs_url" value="" />
+        <param name="target_system_id" value="2" />
+        <param name="target_component_id" value="1" />
+        <param name="fcu_protocol" value="v2.0" />
+        <remap from="/drone2/mavros/imu/data" to="/drone2/imu/data" />
+        <remap from="/drone2/mavros/global_position/global" to="/drone2/global_position/global" />
+        <remap from="/drone2/mavros/local_position/pose" to="/drone2/local_position/pose" />
+    </node>
+
+</launch>
